@@ -129,6 +129,105 @@ class QueueProcessor:
                 collection=collection_name
             )
 
+    def _validate_product_type(self, spec_sheet_url: str, expected_collection: str) -> bool:
+        """
+        Validate that the spec sheet matches the expected product type.
+        Returns True if valid, False if mismatch.
+        """
+        import requests as req
+        from config.settings import get_settings
+
+        settings = get_settings()
+        openai_key = settings.OPENAI_API_KEY
+
+        if not openai_key:
+            return True  # Skip validation if no API key
+
+        try:
+            # Try text extraction first
+            pdf_text = self._extract_text_from_pdf(spec_sheet_url)
+
+            if pdf_text:
+                # Quick text-based validation
+                validation_prompt = f"""Is this spec sheet for a {self._get_collection_context(expected_collection)}?
+
+Spec sheet content:
+{pdf_text[:2000]}
+
+Answer with ONLY 'yes' or 'no'."""
+            else:
+                # Fall back to image validation
+                image_content = self._convert_to_image(spec_sheet_url)
+                if not image_content:
+                    return True  # Can't validate, proceed
+
+                validation_prompt = f"""Is this spec sheet for a {self._get_collection_context(expected_collection)}?
+
+Answer with ONLY 'yes' or 'no'."""
+
+                # Use vision for validation
+                payload = {
+                    "model": "gpt-4o-mini",  # Use cheaper model for validation
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": validation_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_content}"}
+                            }
+                        ]
+                    }],
+                    "max_tokens": 10
+                }
+
+                response = req.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {openai_key}"
+                    },
+                    json=payload,
+                    timeout=30
+                )
+                response.raise_for_status()
+                result = response.json()
+                answer = result['choices'][0]['message']['content'].strip().lower()
+
+                is_valid = 'yes' in answer
+                if not is_valid:
+                    logger.warning(f"  ⚠️  Product type mismatch: Expected {expected_collection}, spec sheet appears to be different")
+                return is_valid
+
+            # Text-based validation (simpler, no image needed)
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": validation_prompt}],
+                "max_tokens": 10
+            }
+
+            response = req.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_key}"
+                },
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            answer = result['choices'][0]['message']['content'].strip().lower()
+
+            is_valid = 'yes' in answer
+            if not is_valid:
+                logger.warning(f"  ⚠️  Product type mismatch: Expected {expected_collection}, spec sheet appears to be different")
+            return is_valid
+
+        except Exception as e:
+            logger.debug(f"  Product type validation failed: {e}")
+            return True  # Proceed if validation fails
+
     def _extract_with_ai(self, spec_sheet_url: str, collection_name: str, config) -> Dict[str, Any]:
         """
         Perform AI extraction using the Vision API with collection-specific prompts.
@@ -143,6 +242,11 @@ class QueueProcessor:
 
         if not openai_key:
             raise ValueError("OpenAI API key not configured")
+
+        # Validate product type first
+        if not self._validate_product_type(spec_sheet_url, collection_name):
+            logger.warning(f"  ⚠️  Skipping extraction - spec sheet doesn't match expected collection: {collection_name}")
+            return {}
 
         # Get extraction fields from config
         extraction_fields = getattr(config, 'ai_extraction_fields', [])
@@ -181,32 +285,52 @@ RULES:
 
 Return as JSON object."""
 
-        # Handle PDF conversion
-        image_content = self._convert_to_image(spec_sheet_url)
+        # Try text extraction first for PDFs (more reliable for structured specs)
+        is_pdf = spec_sheet_url.lower().endswith('.pdf') or 'pdf' in spec_sheet_url.lower()
+        pdf_text = None
 
-        # Build API request
-        if image_content:
-            image_data = {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_content}"}
+        if is_pdf:
+            pdf_text = self._extract_text_from_pdf(spec_sheet_url)
+
+        # Build API request based on available content
+        if pdf_text:
+            # Use text-based extraction (more accurate for spec sheets with tables)
+            payload = {
+                "model": "gpt-4o",
+                "messages": [{
+                    "role": "user",
+                    "content": f"{extraction_prompt}\n\nSpec sheet content:\n\n{pdf_text[:8000]}"
+                }],
+                "max_tokens": 2000,
+                "response_format": {"type": "json_object"}
             }
         else:
-            image_data = {
-                "type": "image_url",
-                "image_url": {"url": spec_sheet_url}
-            }
+            # Fall back to vision-based extraction
+            image_content = self._convert_to_image(spec_sheet_url)
 
-        payload = {
-            "model": "gpt-4o",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": extraction_prompt},
-                    image_data
-                ]
-            }],
-            "max_tokens": 2000
-        }
+            if image_content:
+                image_data = {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_content}"}
+                }
+            else:
+                image_data = {
+                    "type": "image_url",
+                    "image_url": {"url": spec_sheet_url}
+                }
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": extraction_prompt},
+                        image_data
+                    ]
+                }],
+                "max_tokens": 2000,
+                "response_format": {"type": "json_object"}  # Force JSON responses
+            }
 
         response = req.post(
             "https://api.openai.com/v1/chat/completions",
@@ -224,6 +348,37 @@ Return as JSON object."""
 
         # Parse JSON from response
         return self._parse_json_response(content)
+
+    def _extract_text_from_pdf(self, url: str) -> Optional[str]:
+        """Extract text content from PDF if available"""
+        import requests as req
+
+        try:
+            pdf_response = req.get(url, timeout=30)
+            pdf_response.raise_for_status()
+            pdf_bytes = pdf_response.content
+
+            # Try PyMuPDF for text extraction
+            try:
+                import fitz
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                text = ""
+                # Extract text from first 2 pages
+                for page_num in range(min(2, doc.page_count)):
+                    text += doc[page_num].get_text()
+                doc.close()
+
+                # Check if we got meaningful text (at least 200 chars)
+                if len(text.strip()) > 200:
+                    logger.info(f"  📝 Extracted {len(text)} chars of text from PDF")
+                    return text.strip()
+            except ImportError:
+                pass
+
+        except Exception as e:
+            logger.debug(f"  Text extraction failed: {e}")
+
+        return None
 
     def _convert_to_image(self, url: str) -> Optional[str]:
         """Convert PDF to base64 image for Vision API"""
@@ -320,6 +475,9 @@ IMPORTANT - Use these EXACT values:
     def _parse_json_response(self, content: str) -> Dict[str, Any]:
         """Parse JSON from AI response"""
         import re
+        if not content:
+            logger.warning("Empty response content from AI")
+            return {}
 
         # Try markdown code block first
         json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)

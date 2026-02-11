@@ -530,6 +530,26 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"❌ Error registering bulk PDF extraction routes: {e}")
 
+# Register Review Queue UI routes
+try:
+    from routes.review_queue_routes import setup_review_queue_routes
+    setup_review_queue_routes(app)
+    logger.info("✅ Review queue routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Review queue routes not available: {e}")
+except Exception as e:
+    logger.error(f"❌ Error registering review queue routes: {e}")
+
+# Register Shopify baseline import UI routes
+try:
+    from routes.shopify_baseline_routes import setup_shopify_baseline_routes
+    setup_shopify_baseline_routes(app)
+    logger.info("✅ Shopify baseline routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Shopify baseline routes not available: {e}")
+except Exception as e:
+    logger.error(f"❌ Error registering Shopify baseline routes: {e}")
+
 # =============================================================================
 # CAPRICE PRICING COMPARISON CONFIGURATION
 # =============================================================================

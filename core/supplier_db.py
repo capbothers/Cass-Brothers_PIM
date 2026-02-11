@@ -7,7 +7,7 @@ import sqlite3
 import json
 import os
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ class SupplierDatabase:
                 product_url TEXT NOT NULL,
                 product_name TEXT,
                 image_url TEXT,
+                spec_sheet_url TEXT,
+                last_scraped_at TIMESTAMP,
                 detected_collection TEXT,
                 confidence_score REAL,
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -106,6 +108,7 @@ class SupplierDatabase:
                 sku TEXT NOT NULL,
                 target_collection TEXT NOT NULL,
                 status TEXT DEFAULT 'pending',
+                run_id TEXT,
                 shopify_product_id TEXT,
                 shopify_handle TEXT,
                 title TEXT,
@@ -118,6 +121,11 @@ class SupplierDatabase:
                 shopify_spec_sheet TEXT,
                 body_html TEXT,
                 extracted_images TEXT,
+                extracted_data TEXT,
+                confidence_summary TEXT,
+                reviewed_data TEXT,
+                applied_fields TEXT,
+                applied_at TIMESTAMP,
                 processing_notes TEXT,
                 error_message TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -129,11 +137,46 @@ class SupplierDatabase:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_pq_sku ON processing_queue(sku)
         ''')
+
+        # Shopify baseline snapshot (from export_shopify_products.py)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS shopify_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT,
+                product_id TEXT,
+                variant_id TEXT UNIQUE,
+                vendor TEXT,
+                title TEXT,
+                product_type TEXT,
+                status TEXT,
+                handle TEXT,
+                tags TEXT,
+                price TEXT,
+                compare_at_price TEXT,
+                weight TEXT,
+                image_src TEXT,
+                body_html_length INTEGER,
+                created_at TEXT,
+                updated_at TEXT,
+                meta_json TEXT,
+                raw_json TEXT,
+                imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_shopify_sku ON shopify_products(sku)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_shopify_vendor ON shopify_products(vendor)
+        ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_pq_collection ON processing_queue(target_collection)
         ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_pq_status ON processing_queue(status)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_pq_run_id ON processing_queue(run_id)
         ''')
 
         conn.commit()
@@ -595,6 +638,64 @@ class SupplierDatabase:
         }
 
     # ==========================================================================
+    # Spec Sheet Discovery Methods
+    # ==========================================================================
+
+    def update_spec_sheet_url(self, sku: str, spec_sheet_url: str) -> bool:
+        """Update spec sheet URL for a supplier product"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE supplier_products
+            SET spec_sheet_url = ?, last_scraped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE sku = ?
+        ''', (spec_sheet_url, sku))
+
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+
+        return updated
+
+    def get_products_without_spec_sheets(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get supplier products that don't have spec sheet URLs yet"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT * FROM supplier_products
+            WHERE spec_sheet_url IS NULL OR spec_sheet_url = ''
+            ORDER BY created_at DESC
+            LIMIT ?
+        ''', (limit,))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+
+    def get_products_for_rescraping(self, days_old: int = 30, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get products whose spec sheets should be re-scraped (older than X days)"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT * FROM supplier_products
+            WHERE last_scraped_at IS NULL
+               OR last_scraped_at < datetime('now', '-' || ? || ' days')
+            ORDER BY last_scraped_at ASC NULLS FIRST
+            LIMIT ?
+        ''', (days_old, limit))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+
+    # ==========================================================================
     # Collection Override Methods
     # ==========================================================================
 
@@ -659,7 +760,7 @@ class SupplierDatabase:
     # Processing Queue Methods
     # ==========================================================================
 
-    def add_to_processing_queue(self, product_data: Dict[str, Any], target_collection: str) -> int:
+    def add_to_processing_queue(self, product_data: Dict[str, Any], target_collection: str, run_id: str = None) -> int:
         """
         Add a product to the processing queue.
 
@@ -675,14 +776,15 @@ class SupplierDatabase:
 
         cursor.execute('''
             INSERT INTO processing_queue (
-                sku, target_collection, status,
+                sku, target_collection, status, run_id,
                 shopify_product_id, shopify_handle, title, vendor,
                 shopify_images, shopify_price, shopify_compare_price,
                 shopify_status, shopify_weight, shopify_spec_sheet, body_html
-            ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             product_data.get('variant_sku', ''),
             target_collection,
+            run_id,
             product_data.get('id', ''),
             product_data.get('handle', ''),
             product_data.get('title', ''),
@@ -702,7 +804,7 @@ class SupplierDatabase:
 
         return queue_id
 
-    def add_batch_to_processing_queue(self, products: List[Dict[str, Any]], target_collection: str) -> Dict[str, Any]:
+    def add_batch_to_processing_queue(self, products: List[Dict[str, Any]], target_collection: str, run_id: str = None) -> Dict[str, Any]:
         """
         Add multiple products to the processing queue.
 
@@ -728,14 +830,15 @@ class SupplierDatabase:
 
             cursor.execute('''
                 INSERT INTO processing_queue (
-                    sku, target_collection, status,
+                    sku, target_collection, status, run_id,
                     shopify_product_id, shopify_handle, title, vendor,
                     shopify_images, shopify_price, shopify_compare_price,
                     shopify_status, shopify_weight, shopify_spec_sheet, body_html
-                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 sku,
                 target_collection,
+                run_id,
                 product.get('id', ''),
                 product.get('handle', ''),
                 product.get('title', ''),
@@ -930,6 +1033,88 @@ class SupplierDatabase:
             'by_collection': by_collection
         }
 
+    def import_shopify_baseline_rows(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Import Shopify baseline rows into shopify_products table."""
+        if not rows:
+            return {'imported': 0, 'skipped': 0}
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        imported = 0
+        skipped = 0
+
+        for row in rows:
+            sku = row.get('sku', '') or None
+            product_id = row.get('product_id', '') or None
+            variant_id = row.get('variant_id', '') or None
+            vendor = row.get('vendor', '') or None
+            title = row.get('title', '') or None
+            product_type = row.get('product_type', '') or None
+            status = row.get('status', '') or None
+            handle = row.get('handle', '') or None
+            tags = row.get('tags', '') or None
+            price = row.get('price', '') or None
+            compare_at_price = row.get('compare_at_price', '') or None
+            weight = row.get('weight', '') or None
+            image_src = row.get('image_src', '') or None
+            body_html_length = row.get('body_html_length') or None
+            created_at = row.get('created_at', '') or None
+            updated_at = row.get('updated_at', '') or None
+
+            meta = {}
+            for key, value in row.items():
+                if key.startswith('meta_') and value not in (None, ''):
+                    meta[key[5:]] = value
+
+            if not variant_id and not sku:
+                skipped += 1
+                continue
+
+            cursor.execute('''
+                INSERT OR REPLACE INTO shopify_products (
+                    sku, product_id, variant_id, vendor, title, product_type, status, handle,
+                    tags, price, compare_at_price, weight, image_src, body_html_length,
+                    created_at, updated_at, meta_json, raw_json, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                sku, product_id, variant_id, vendor, title, product_type, status, handle,
+                tags, price, compare_at_price, weight, image_src, body_html_length,
+                created_at, updated_at, json.dumps(meta), json.dumps(row)
+            ))
+            imported += 1
+
+        conn.commit()
+        conn.close()
+
+        return {'imported': imported, 'skipped': skipped}
+
+    def get_shopify_baseline_stats(self) -> Dict[str, Any]:
+        """Get summary stats for the Shopify baseline table."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT COUNT(*) FROM shopify_products')
+        total = cursor.fetchone()[0] or 0
+
+        cursor.execute('SELECT COUNT(DISTINCT sku) FROM shopify_products')
+        distinct_skus = cursor.fetchone()[0] or 0
+
+        cursor.execute('SELECT COUNT(DISTINCT vendor) FROM shopify_products')
+        distinct_vendors = cursor.fetchone()[0] or 0
+
+        cursor.execute('SELECT MAX(imported_at) FROM shopify_products')
+        last_imported = cursor.fetchone()[0]
+
+        conn.close()
+
+        return {
+            'total_rows': total,
+            'distinct_skus': distinct_skus,
+            'distinct_vendors': distinct_vendors,
+            'last_imported_at': last_imported,
+        }
+
     def get_processing_queue_by_sku(self, sku: str) -> Optional[Dict[str, Any]]:
         """Check if a SKU is already in the processing queue"""
         conn = sqlite3.connect(self.db_path)
@@ -991,6 +1176,194 @@ class SupplierDatabase:
         conn.close()
 
         return updated
+
+    def update_processing_queue_confidence(self, queue_id: int, confidence_summary: Dict[str, Any]) -> bool:
+        """Update confidence summary for a processing queue item"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE processing_queue
+            SET confidence_summary = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (json.dumps(confidence_summary), queue_id))
+
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+
+        return updated
+
+    def update_processing_queue_reviewed_data(self, queue_id: int, reviewed_data: Dict[str, Any]) -> bool:
+        """Update reviewed/corrected data for a processing queue item"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE processing_queue
+            SET reviewed_data = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (json.dumps(reviewed_data), queue_id))
+
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+
+        return updated
+
+    def get_items_needing_review(self, confidence_threshold: float = 0.6) -> List[Dict[str, Any]]:
+        """
+        Get processing queue items with low-confidence fields needing manual review
+
+        Args:
+            confidence_threshold: Only return items with overall confidence below this
+
+        Returns:
+            List of queue items with their confidence summaries
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT pq.*, sp.supplier_name, sp.product_url, sp.spec_sheet_url
+            FROM processing_queue pq
+            LEFT JOIN supplier_products sp ON pq.sku = sp.sku
+            WHERE pq.confidence_summary IS NOT NULL
+              AND pq.confidence_summary != ''
+            ORDER BY pq.created_at DESC
+        ''')
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Filter items with low confidence
+        items = []
+        for row in rows:
+            item = dict(row)
+            # Parse confidence summary
+            if item.get('confidence_summary'):
+                try:
+                    conf_summary = json.loads(item['confidence_summary'])
+                    overall = conf_summary.get('overall_confidence', 1.0)
+                    review_fields = conf_summary.get('review_fields', {})
+                    review_count = len(review_fields) if isinstance(review_fields, dict) else 0
+                    # Include if overall is low OR there are review fields
+                    if overall < confidence_threshold or review_count > 0:
+                        items.append(item)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        return items
+
+    def update_processing_queue_applied_fields(self, queue_id: int, applied_fields: Dict[str, Any]) -> bool:
+        """
+        Update applied_fields to track what was pushed to Shopify
+
+        Args:
+            queue_id: Processing queue ID
+            applied_fields: Dict of field_name -> value that was applied
+
+        Returns:
+            True if updated successfully
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE processing_queue
+            SET applied_fields = ?, applied_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (json.dumps(applied_fields), queue_id))
+
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+
+        return updated
+
+    def merge_extracted_data(self, existing: Dict[str, Any], extracted: Dict[str, Any],
+                            strategy: str = 'conservative') -> Dict[str, Any]:
+        """
+        Merge extracted data with existing data using specified strategy.
+
+        Args:
+            existing: Existing data (e.g., from Shopify or previous extraction)
+            extracted: Newly extracted data
+            strategy: Merge strategy ('conservative', 'aggressive', 'reviewed_priority')
+
+        Returns:
+            Merged data dictionary
+
+        Strategies:
+            - conservative: Only update if existing field is empty/None
+            - aggressive: Always use extracted data (overwrite)
+            - reviewed_priority: Prefer reviewed_data > extracted > existing
+        """
+        merged = existing.copy() if existing else {}
+
+        if strategy == 'conservative':
+            # Only add new fields if they don't exist or are empty
+            for key, value in extracted.items():
+                if value is not None and value != '':
+                    # Only update if existing is None, empty, or doesn't exist
+                    existing_value = merged.get(key)
+                    if existing_value is None or existing_value == '':
+                        merged[key] = value
+
+        elif strategy == 'aggressive':
+            # Always use extracted data (overwrite everything)
+            merged.update(extracted)
+
+        elif strategy == 'reviewed_priority':
+            # This will be used with reviewed_data
+            # For now, same as conservative
+            for key, value in extracted.items():
+                if value is not None and value != '':
+                    existing_value = merged.get(key)
+                    if existing_value is None or existing_value == '':
+                        merged[key] = value
+
+        return merged
+
+    def get_or_create_processing_queue(self, sku: str, product_data: Dict[str, Any],
+                                      target_collection: str) -> Tuple[int, bool]:
+        """
+        Get existing processing queue item or create new one.
+
+        Args:
+            sku: Product SKU
+            product_data: Product data dict
+            target_collection: Target collection
+
+        Returns:
+            Tuple of (queue_id, created)
+            - queue_id: ID of the processing queue item
+            - created: True if new item was created, False if existing item was returned
+        """
+        # Check if SKU already exists in processing queue
+        existing = self.get_processing_queue_by_sku(sku)
+
+        if existing:
+            logger.info(f"SKU {sku} already in processing queue (ID: {existing['id']})")
+            return existing['id'], False
+
+        # Create new entry
+        queue_id = self.add_to_processing_queue(product_data, target_collection)
+        logger.info(f"Created new processing queue entry for {sku} (ID: {queue_id})")
+        return queue_id, True
+
+    def get_product_by_sku(self, sku: str) -> Optional[Dict[str, Any]]:
+        """Get a supplier product by SKU"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT * FROM supplier_products WHERE sku = ?', (sku,))
+        row = cursor.fetchone()
+        conn.close()
+
+        return dict(row) if row else None
 
 
 # Singleton instance

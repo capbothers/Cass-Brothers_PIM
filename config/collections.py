@@ -74,8 +74,8 @@ class SinksCollection(CollectionConfig):
         self.supports_pdf_extraction = True                # Can extract from PDF spec sheets
 
         self.ai_extraction_fields = [
-            'sku', 'title', 'brand_name', 'vendor', 'installation_type', 'product_material',
-            'grade_of_material', 'style', 'has_overflow', 'bowls_number', 'range',
+            'title', 'brand_name', 'vendor', 'installation_type', 'product_material',
+            'grade_of_material', 'style', 'has_overflow', 'bowls_number',
             'application_location', 'drain_position', 'shopify_images',
             # Boolean fields - calculated from installation_type by data_cleaner
             'is_undermount', 'is_topmount', 'is_flushmount',
@@ -85,7 +85,7 @@ class SinksCollection(CollectionConfig):
             'second_bowl_width_mm', 'second_bowl_depth_mm', 'second_bowl_height_mm',
             'min_cabinet_size_mm', 'cutout_size_mm', 'waste_outlet_dimensions',
             # Calculated fields
-            'warranty_years', 'cubic_weight'
+            'warranty_years'
         ]
 
         # Quality fields determine which fields are checked in the "Missing Information" filter
@@ -406,8 +406,7 @@ class ToiletsCollection(CollectionConfig):
             'trap_type', 'actuation_type', 'toilet_seat_type', 'toilet_rim_design',
             'warranty_years', 'pan_height', 'pan_depth', 'pan_width',
             'wels_rating', 'wels_product_registration_number', 'flow_rate_L_per_min',
-            'application_location', 'body_html', 'features',
-            'care_instructions', 'faqs', 'shopify_spec_sheet'
+            'application_location', 'faqs', 'shopify_spec_sheet'
         ]
 
         # Pricing fields configuration
@@ -564,7 +563,7 @@ class SmartToiletsCollection(CollectionConfig):
             'warranty_years', 'pan_height', 'pan_depth', 'pan_width',
             'power_rating_watts', 'voltage', 'has_bidet_wash', 'has_heated_seat',
             'has_warm_air_dryer', 'has_night_light', 'has_auto_flush', 'control_type',
-            'body_html', 'features', 'care_instructions', 'faqs', 'shopify_spec_sheet'
+            'faqs', 'shopify_spec_sheet'
         ]
 
         # Pricing fields configuration
@@ -769,7 +768,7 @@ class ShowersCollection(CollectionConfig):
             'wels_rating', 'wels_lpm', 'flow_rate_lpm', 'pressure_min_kpa', 'pressure_max_kpa',
             'handpiece_diameter_mm', 'spray_functions', 'spray_types',
             'rail_length_mm', 'hose_length_mm', 'overhead_diameter_mm', 'arm_length_mm',
-            'warranty_years', 'body_html', 'features', 'care_instructions', 'faqs', 'shopify_spec_sheet'
+            'warranty_years', 'faqs', 'shopify_spec_sheet'
         ]
 
         # Pricing fields configuration
@@ -1331,7 +1330,6 @@ class HotWaterCollection(CollectionConfig):
             'no_of_people',           # Number of people (capacity indicator)
             'no_of_bathrooms',        # Number of bathrooms
             'capacity',               # Tank capacity (L)
-            'location',               # Indoor, Outdoor, etc.
         ]
 
         self.quality_fields = [

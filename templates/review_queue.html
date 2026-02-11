@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Queue - PIM</title>
+
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet" />
+</head>
+<body class="bg-light">
+    <div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <h1 class="h4 mb-1">Review Queue</h1>
+                <div class="text-muted small">Low-confidence fields requiring approval</div>
+            </div>
+            <form class="d-flex gap-2" method="get" action="/review-queue">
+                <input class="form-control form-control-sm" type="number" step="0.05" min="0" max="1"
+                       name="threshold" value="{{ threshold }}" style="width: 110px;" />
+                <input class="form-control form-control-sm" type="number" min="1" name="limit"
+                       value="{{ limit }}" style="width: 110px;" />
+                <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+            </form>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="mb-3">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} mb-2">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div class="small text-muted">
+                    Total items needing review: {{ total_items }}
+                </div>
+                <div class="small text-muted">
+                    Showing: {{ rows|length }}
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-striped align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>SKU</th>
+                            <th>Field</th>
+                            <th>Extracted</th>
+                            <th>Confidence</th>
+                            <th>Reason</th>
+                            <th>Approved Value</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            <td>
+                                <div class="fw-semibold">{{ row.sku }}</div>
+                                <div class="small text-muted">{{ row.collection }}</div>
+                            </td>
+                            <td>{{ row.field_name }}</td>
+                            <td class="small text-muted">{{ row.extracted_value }}</td>
+                            <td class="small">{{ row.confidence_score }}</td>
+                            <td class="small text-muted">{{ row.reason }}</td>
+                            <td>
+                                <form method="post" action="/review-queue/approve" class="d-flex gap-2">
+                                    <input type="hidden" name="queue_id" value="{{ row.queue_id }}">
+                                    <input type="hidden" name="field_name" value="{{ row.field_name }}">
+                                    <input class="form-control form-control-sm" name="approved_value"
+                                           value="{{ row.approved_value }}" placeholder="Approved value" />
+                                    <button class="btn btn-sm btn-success" type="submit">Approve</button>
+                                </form>
+                            </td>
+                            <td class="small text-muted">
+                                <div>{{ row.title }}</div>
+                                {% if row.product_url %}
+                                <div><a href="{{ row.product_url }}" target="_blank">Product URL</a></div>
+                                {% endif %}
+                                {% if row.spec_sheet_url %}
+                                <div><a href="{{ row.spec_sheet_url }}" target="_blank">Spec Sheet</a></div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    {% if rows|length == 0 %}
+                        <tr>
+                            <td colspan="7" class="text-center text-muted py-4">No items to review.</td>
+                        </tr>
+                    {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
